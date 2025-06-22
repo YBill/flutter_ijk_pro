@@ -1,0 +1,32 @@
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.buildDir = "../build"
+subprojects {
+    project.buildDir = "${rootProject.buildDir}/${project.name}"
+}
+subprojects {
+    project.evaluationDependsOn(":app")
+}
+
+// Fix fijkplayer namespace issue
+subprojects { project ->
+    project.plugins.whenPluginAdded { plugin ->
+        if (plugin.class.name == 'com.android.build.gradle.LibraryPlugin') {
+            project.android {
+                if (project.name == 'fijkplayer') {
+                    namespace = 'com.befovy.fijkplayer'
+                    compileSdkVersion 35
+                }
+            }
+        }
+    }
+}
+
+tasks.register("clean", Delete) {
+    delete rootProject.buildDir
+}
