@@ -12,7 +12,10 @@ class VideoPlayerPage extends StatefulWidget {
 class _VideoPlayerPageState extends State<VideoPlayerPage> with TickerProviderStateMixin {
   static const String TAG = 'TestVideoPage';
 
-  String get videoUrl => "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8";
+  // String get videoUrl => "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8";
+  String get videoUrl =>
+      "https://overseas-resource-storage.s3.amazonaws.com/explore/test/20250603170705_9e1750c0-1550-423d-b471-53f00ac7297b/v0/prog.m3u8";
+  // String get videoUrl => "https://overseas-resource-storage.s3.amazonaws.com/explore/test/20250603170705_9e1750c0-1550-423d-b471-53f00ac7297b/master.m3u8";
 
   FijkPlayer? _player;
   bool _isInitialized = false;
@@ -47,6 +50,19 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> with TickerProviderSt
       _player!.setOption(FijkOption.formatCategory, "reconnect", 1);
       _player!.setOption(FijkOption.formatCategory, "timeout", 20000000);
       _player!.setOption(FijkOption.formatCategory, "user_agent", "Flutter FijkPlayer");
+
+      // 针对 HLS 流的特殊设置
+      if (videoUrl.contains('.m3u8')) {
+        LogD(tag: TAG, 'HLS 流检测到，使用手动循环播放');
+        // HLS 流不使用 setLoop，因为可能导致 seek 错误
+        // 为 HLS 流添加特殊选项
+        _player!.setOption(FijkOption.formatCategory, "live_start_index", -1);
+        _player!.setOption(FijkOption.formatCategory, "allowed_media_types", "video+audio");
+      } else {
+        LogD(tag: TAG, '普通视频文件，使用 setLoop 循环播放');
+        // 只对普通视频文件使用 setLoop
+        _player!.setLoop(0);
+      }
 
       // 监听播放器状态
       _player!.addListener(_playerListener);
@@ -150,6 +166,19 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> with TickerProviderSt
       LogD(tag: TAG, '播放器初始化完成');
     } else if (value.state == FijkState.completed) {
       LogD(tag: TAG, '播放完成');
+      // 根据视频类型选择循环策略
+      if (videoUrl.contains('.m3u8')) {
+        LogD(tag: TAG, 'HLS 流播放完成，使用手动循环播放');
+        // HLS 流使用手动循环，避免 seek 错误
+        _player?.seekTo(0).then((_) {
+          _player?.start();
+          LogD(tag: TAG, 'HLS 流循环播放已开始');
+        }).catchError((error) {
+          LogE(tag: TAG, 'HLS 流循环播放失败: $error');
+        });
+      } else {
+        LogD(tag: TAG, '普通视频播放完成 - setLoop(0) 会自动循环');
+      }
     } else if (value.state == FijkState.stopped) {
       LogD(tag: TAG, '播放停止');
     } else if (value.state == FijkState.error) {
