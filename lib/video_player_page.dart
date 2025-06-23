@@ -1,5 +1,5 @@
-import 'package:flutter/material.dart';
 import 'package:fijkplayer/fijkplayer.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_ijk_pro/log_utils.dart';
 
 class VideoPlayerPage extends StatefulWidget {
@@ -9,7 +9,7 @@ class VideoPlayerPage extends StatefulWidget {
   State<VideoPlayerPage> createState() => _VideoPlayerPageState();
 }
 
-class _VideoPlayerPageState extends State<VideoPlayerPage> {
+class _VideoPlayerPageState extends State<VideoPlayerPage> with TickerProviderStateMixin {
   static const String TAG = 'TestVideoPage';
 
   String get videoUrl => "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8";
@@ -17,8 +17,12 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
   FijkPlayer? _player;
   bool _isInitialized = false;
   bool _isPlaying = false;
+  bool _isBuffering = false;
   bool _showControls = true;
   String? _errorMessage;
+  Duration _currentPosition = Duration.zero;
+  Duration _totalDuration = Duration.zero;
+  bool _isDragging = false;
 
   @override
   void initState() {
@@ -42,26 +46,43 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
       _player!.setOption(FijkOption.playerCategory, "packet-buffering", 0);
       _player!.setOption(FijkOption.formatCategory, "reconnect", 1);
       _player!.setOption(FijkOption.formatCategory, "timeout", 20000000);
-      _player!.setOption(
-          FijkOption.formatCategory, "user_agent", "Flutter FijkPlayer");
+      _player!.setOption(FijkOption.formatCategory, "user_agent", "Flutter FijkPlayer");
 
       // 监听播放器状态
       _player!.addListener(_playerListener);
+
+      // 监听播放进度
+      _player!.onCurrentPosUpdate.listen((Duration position) {
+        if (mounted && !_isDragging) {
+          // 只有在有实际进度时才记录日志，避免日志过多
+          if (position.inSeconds > 0) {
+            // LogD(tag: TAG, '播放进度更新: ${position.inSeconds}秒');
+          }
+          setState(() {
+            _currentPosition = position;
+          });
+        }
+      });
 
       // 设置数据源并准备播放
       _player!.setDataSource(videoUrl, autoPlay: false).then((_) {
         LogD(tag: TAG, 'Data source set successfully');
         return _player!.prepareAsync();
       }).then((_) {
-        LogD(tag: TAG, 'Player prepared successfully');
+        LogD(tag: TAG, 'Player prepared successfully, 开始初始化UI状态');
         if (mounted) {
           setState(() {
             _isInitialized = true;
+            _isBuffering = true; // 播放器准备好但视频还未渲染，显示缓冲状态
             _errorMessage = null;
           });
-
+          LogD(tag: TAG, '准备调用start()开始播放');
           // 自动开始播放
-          _player!.start();
+          _player!.start().then((_) {
+            LogD(tag: TAG, 'start()调用成功');
+          }).catchError((error) {
+            LogE(tag: TAG, 'start()调用失败: $error');
+          });
         }
       }).catchError((error) {
         LogE(tag: TAG, 'Player initialization error: $error');
@@ -78,22 +99,81 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
 
     final FijkValue value = _player!.value;
 
+    // 详细的状态日志
+    LogD(tag: TAG, '播放器状态变化: ${value.state}');
+    LogD(tag: TAG, '当前播放状态: isPlaying=$_isPlaying, isBuffering=$_isBuffering, isInitialized=$_isInitialized');
+    LogD(tag: TAG, '播放器缓冲状态: ${_player!.isBuffering}');
+    LogD(tag: TAG, '视频渲染状态: ${value.videoRenderStart}');
+    LogD(tag: TAG, '音频渲染状态: ${value.audioRenderStart}');
+
+    bool shouldUpdateState = false;
+    bool newIsPlaying = _isPlaying;
+    bool newIsBuffering = _isBuffering;
+
+    // 监听视频渲染开始 - 这是真正可以看到视频的时刻
+    if (value.videoRenderStart) {
+      LogD(tag: TAG, '视频渲染开始，停止缓冲显示');
+      newIsBuffering = false;
+      shouldUpdateState = true;
+    }
+    // 如果播放器已初始化但视频还未渲染，强制显示缓冲
+    else if (_isInitialized && !value.videoRenderStart) {
+      LogD(tag: TAG, '播放器已初始化但视频未渲染，强制显示缓冲状态');
+      newIsBuffering = true;
+      shouldUpdateState = true;
+    }
+
     // 监听播放状态变化
     if (value.state == FijkState.started) {
-      if (!_isPlaying) {
-        setState(() {
-          _isPlaying = true;
-        });
+      LogD(tag: TAG, '视频开始播放');
+      newIsPlaying = true;
+      // 只有当视频渲染开始时才停止缓冲
+      if (value.videoRenderStart) {
+        newIsBuffering = false;
       }
+      shouldUpdateState = true;
     } else if (value.state == FijkState.paused) {
-      if (_isPlaying) {
-        setState(() {
-          _isPlaying = false;
-        });
-      }
+      LogD(tag: TAG, '视频暂停');
+      newIsPlaying = false;
+      shouldUpdateState = true;
+    } else if (value.state == FijkState.prepared) {
+      LogD(tag: TAG, '播放器准备完成，等待播放');
+      newIsBuffering = true;
+      shouldUpdateState = true;
+    } else if (value.state == FijkState.asyncPreparing) {
+      LogD(tag: TAG, '播放器正在异步准备');
+      newIsBuffering = true;
+      shouldUpdateState = true;
+    } else if (value.state == FijkState.idle) {
+      LogD(tag: TAG, '播放器空闲状态');
+    } else if (value.state == FijkState.initialized) {
+      LogD(tag: TAG, '播放器初始化完成');
+    } else if (value.state == FijkState.completed) {
+      LogD(tag: TAG, '播放完成');
+    } else if (value.state == FijkState.stopped) {
+      LogD(tag: TAG, '播放停止');
     } else if (value.state == FijkState.error) {
       LogE(tag: TAG, 'Player error: ${value.exception}');
       _handlePlayerError(value.exception);
+    }
+
+    // 统一更新状态
+    if (shouldUpdateState && mounted) {
+      if (newIsPlaying != _isPlaying || newIsBuffering != _isBuffering) {
+        LogD(tag: TAG, '更新状态: isPlaying=$newIsPlaying, isBuffering=$newIsBuffering');
+        setState(() {
+          _isPlaying = newIsPlaying;
+          _isBuffering = newIsBuffering;
+        });
+      }
+    }
+
+    // 更新总时长
+    if (mounted && value.duration != _totalDuration) {
+      LogD(tag: TAG, '视频总时长: ${value.duration}');
+      setState(() {
+        _totalDuration = value.duration;
+      });
     }
   }
 
@@ -101,8 +181,7 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
     if (mounted) {
       setState(() {
         _isInitialized = false;
-        _errorMessage =
-            'Failed to load any video. Last error: ${error.toString()}';
+        _errorMessage = 'Failed to load any video. Last error: ${error.toString()}';
       });
     }
   }
@@ -137,8 +216,7 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
-        title: Text('IjkPlayer',
-            style: const TextStyle(color: Colors.white, fontSize: 16)),
+        title: Text('IjkPlayer', style: const TextStyle(color: Colors.white, fontSize: 16)),
         backgroundColor: Colors.black,
         iconTheme: const IconThemeData(color: Colors.white),
       ),
@@ -162,14 +240,18 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
       child: Stack(
         alignment: Alignment.center,
         children: [
-          // FijkPlayer视频播放器
+          // ijkPlayer视频播放器
           FijkView(
             player: _player!,
             width: double.infinity,
             height: double.infinity,
             fit: FijkFit.contain,
             color: Colors.black,
+            panelBuilder: (player, data, context, viewSize, texturePos) => Container(), // 隐藏默认控制器
           ),
+
+          // 缓冲指示器 - 只要在缓冲状态就显示
+          if (_isBuffering) _buildBufferingIndicator(),
 
           // 控制层
           if (_showControls) _buildControlsOverlay(),
@@ -183,25 +265,26 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
       color: Colors.black26,
       child: Stack(
         children: [
-          // 中央播放/暂停按钮
-          Center(
-            child: GestureDetector(
-              onTap: _togglePlayPause,
-              child: Container(
-                width: 80,
-                height: 80,
-                decoration: const BoxDecoration(
-                  color: Colors.black54,
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(
-                  _isPlaying ? Icons.pause : Icons.play_arrow,
-                  color: Colors.white,
-                  size: 40,
+          // 中央播放/暂停按钮 - 缓冲时不显示，避免重叠
+          if (!_isBuffering)
+            Center(
+              child: GestureDetector(
+                onTap: _togglePlayPause,
+                child: Container(
+                  width: 80,
+                  height: 80,
+                  decoration: const BoxDecoration(
+                    color: Colors.black54,
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    _isPlaying ? Icons.pause : Icons.play_arrow,
+                    color: Colors.white,
+                    size: 40,
+                  ),
                 ),
               ),
             ),
-          ),
 
           // 底部控制栏
           Positioned(
@@ -238,15 +321,30 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
 
           // 进度条
           Expanded(
-            child: Container(
-              height: 4,
-              decoration: BoxDecoration(
-                color: Colors.grey,
-                borderRadius: BorderRadius.circular(2),
+            child: SliderTheme(
+              data: SliderTheme.of(context).copyWith(
+                trackHeight: 4,
+                thumbColor: Colors.red,
+                activeTrackColor: Colors.red,
+                inactiveTrackColor: Colors.grey,
+                thumbShape: RoundSliderThumbShape(enabledThumbRadius: 6),
+                overlayShape: RoundSliderOverlayShape(overlayRadius: 10),
               ),
-              child: const LinearProgressIndicator(
-                backgroundColor: Colors.grey,
-                valueColor: AlwaysStoppedAnimation<Color>(Colors.red),
+              child: Slider(
+                value: _totalDuration.inMilliseconds > 0
+                    ? _currentPosition.inMilliseconds.toDouble().clamp(0.0, _totalDuration.inMilliseconds.toDouble())
+                    : 0.0,
+                max: _totalDuration.inMilliseconds > 0 ? _totalDuration.inMilliseconds.toDouble() : 1.0,
+                onChanged: (value) {
+                  setState(() {
+                    _currentPosition = Duration(milliseconds: value.toInt());
+                  });
+                },
+                onChangeStart: (_) => _isDragging = true,
+                onChangeEnd: (value) {
+                  _isDragging = false;
+                  _player?.seekTo(value.toInt());
+                },
               ),
             ),
           ),
@@ -254,9 +352,9 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
           const SizedBox(width: 16),
 
           // 时间显示
-          const Text(
-            '00:00 / 00:00',
-            style: TextStyle(color: Colors.white, fontSize: 12),
+          Text(
+            '${_formatDuration(_currentPosition)} / ${_formatDuration(_totalDuration)}',
+            style: const TextStyle(color: Colors.white, fontSize: 12),
           ),
         ],
       ),
@@ -264,16 +362,119 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
   }
 
   Widget _buildLoadingWidget() {
-    return const Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        CircularProgressIndicator(color: Colors.white),
-        SizedBox(height: 16),
-        Text(
-          'Loading M3U8 video with FijkPlayer...',
-          style: TextStyle(color: Colors.white, fontSize: 16),
+    return Container(
+      width: double.infinity,
+      height: double.infinity,
+      color: Colors.black,
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          // Loading动画
+          Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              color: Colors.black54,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const CircularProgressIndicator(
+                  color: Colors.red,
+                  strokeWidth: 3,
+                ),
+                const SizedBox(height: 20),
+                const Text(
+                  '正在加载视频...',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'M3U8 直播流',
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.7),
+                    fontSize: 14,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                // 添加一些点动画效果
+                _buildLoadingDots(),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBufferingIndicator() {
+    return Center(
+      child: Container(
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          color: Colors.black54,
+          borderRadius: BorderRadius.circular(12),
         ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const CircularProgressIndicator(
+              color: Colors.red,
+              strokeWidth: 3,
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              '缓冲中...',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 16,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLoadingDots() {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _buildDot(0),
+        const SizedBox(width: 4),
+        _buildDot(1),
+        const SizedBox(width: 4),
+        _buildDot(2),
       ],
+    );
+  }
+
+  Widget _buildDot(int index) {
+    return TweenAnimationBuilder<double>(
+      duration: const Duration(milliseconds: 800),
+      tween: Tween(begin: 0.3, end: 1.0),
+      builder: (context, value, child) {
+        return AnimatedOpacity(
+          duration: Duration(milliseconds: 400 + (index * 200)),
+          opacity: value,
+          child: Container(
+            width: 6,
+            height: 6,
+            decoration: BoxDecoration(
+              color: Colors.red,
+              shape: BoxShape.circle,
+            ),
+          ),
+        );
+      },
+      onEnd: () {
+        // 循环动画效果可以通过定时器实现，但这里简化处理
+      },
     );
   }
 
@@ -289,8 +490,7 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
         const SizedBox(height: 16),
         const Text(
           'Failed to load video',
-          style: TextStyle(
-              color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+          style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
         ),
         const SizedBox(height: 8),
         Padding(
